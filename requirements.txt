@@ -1,7 +1,3 @@
 fastapi
 pydantic
-imaplib
-email
-smtplib
-dotenv
-datetime
+python-dotenv
