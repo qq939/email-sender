@@ -42,5 +42,6 @@ COPY . /app/
 # 暴露端口
 EXPOSE 5030
 
+
 # 用虚拟环境的python运行程序（和原逻辑一致）
 CMD ["/bin/sh", "-c", "exec /app/venv/bin/python /app/app.py > /var/log/email-sender.log 2>&1"]
