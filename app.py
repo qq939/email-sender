@@ -7,11 +7,13 @@ import email
 from email.header import decode_header
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
 from email.utils import formataddr
 import smtplib
 import dotenv
 from datetime import datetime, timedelta
 import re
+import mimetypes
 
 # 加载环境变量
 dotenv.load_dotenv()
@@ -40,11 +42,13 @@ class EmailItem(BaseModel):
     sender: str
     date: Optional[str] = None
     body: str
+    attachments: Optional[List[str]] = None
 
 class SendEmailRequest(BaseModel):
     to: EmailStr
     subject: str
     body: str
+    attachments: Optional[List[str]] = None
 
 class SendEmailResponse(BaseModel):
     success: bool
@@ -107,27 +111,41 @@ def get_emails_from_allowed_senders(
             
             # 检查发件人是否在白名单中
             if sender_addr in ALLOWED_SENDERS:
-                # 获取邮件正文
+                # 获取邮件正文与附件
                 body = ""
+                attachments: List[str] = []
                 if msg.is_multipart():
                     for part in msg.walk():
                         content_type = part.get_content_type()
                         content_disposition = str(part.get("Content-Disposition"))
-                        
-                        if content_type == "text/plain" and "attachment" not in content_disposition:
+                        if content_type == "text/plain" and "attachment" not in content_disposition and not body:
                             body = part.get_payload(decode=True).decode()
-                            break
+                        # 收集附件文件名（可选）
+                        if "attachment" in content_disposition:
+                            filename = part.get_filename()
+                            if filename:
+                                try:
+                                    decoded = decode_header(filename)
+                                    name_part = decoded[0][0]
+                                    if isinstance(name_part, bytes):
+                                        name_part = name_part.decode(errors="ignore")
+                                    attachments.append(str(name_part))
+                                except Exception:
+                                    attachments.append(str(filename))
                 else:
                     body = msg.get_payload(decode=True).decode()
                 
-                email_info = EmailItem(
-                    id=email_id.decode(),
-                    subject=subject,
-                    sender=sender_addr,
-                    date=msg['Date'],
-                    body=body[:500] + "..." if len(body) > 500 else body  # 限制长度
-                )
-                emails.append(email_info)
+                # 仅返回具备标题与正文的邮件
+                if (subject is not None and str(subject).strip()) and (body is not None and str(body).strip()):
+                    email_info = EmailItem(
+                        id=email_id.decode(),
+                        subject=str(subject),
+                        sender=sender_addr,
+                        date=msg['Date'],
+                        body=body[:500] + "..." if len(body) > 500 else body,  # 限制长度
+                        attachments=attachments or None
+                    )
+                    emails.append(email_info)
         
         mail.close()
         mail.logout()
@@ -138,16 +156,13 @@ def get_emails_from_allowed_senders(
         print(f"Failed to retrieve emails: {e}")
         return []
 
-def send_email(to_email: str, subject: str, body: str) -> dict:
+def send_email(to_email: str, subject: str, body: str, attachments: Optional[List[str]] = None) -> dict:
     """
     发送邮件的函数
     """
-    # 验证收件人邮箱是否在白名单中
-    if to_email not in ALLOWED_SENDERS:
-        return {
-            "success": False,
-            "message": f"Email recipient '{to_email}' is not in the allowed list."
-        }
+    # 标题与正文必填校验
+    if not str(subject).strip() or not str(body).strip():
+        return {"success": False, "message": "subject 与 body 为必填项"}
     
     # 获取配置
     sender_email = os.getenv("EMAIL_SENDER")
@@ -168,6 +183,27 @@ def send_email(to_email: str, subject: str, body: str) -> dict:
         
         # 添加正文
         msg.attach(MIMEText(body, "plain", "utf-8"))
+        # 添加附件（可选）
+        if attachments:
+            for file_path in attachments:
+                if not file_path:
+                    continue
+                if not os.path.exists(file_path):
+                    # 跳过不存在的附件
+                    continue
+                try:
+                    with open(file_path, "rb") as f:
+                        file_data = f.read()
+                        file_name = os.path.basename(file_path)
+                    mime_type, _ = mimetypes.guess_type(file_path)
+                    if mime_type is None:
+                        mime_type = "application/octet-stream"
+                    part = MIMEApplication(file_data, Name=file_name)
+                    part["Content-Disposition"] = f'attachment; filename="{file_name}"'
+                    msg.attach(part)
+                except Exception:
+                    # 单个附件失败不影响整体发送
+                    continue
         
         # 发送邮件
         with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
@@ -207,9 +243,9 @@ async def get_emails(
 @app.post("/send-email/", response_model=SendEmailResponse)
 async def send_email_endpoint(request: SendEmailRequest):
     """
-    发送邮件到指定邮箱（必须在白名单内）
+    发送邮件到指定邮箱（允许任意收件人；标题与正文必填，附件可选）
     """
-    result = send_email(request.to, request.subject, request.body)
+    result = send_email(request.to, request.subject, request.body, request.attachments)
     
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
