@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form
 from pydantic import BaseModel, EmailStr
 from typing import List, Optional
 import os
@@ -14,6 +14,7 @@ import dotenv
 from datetime import datetime, timedelta
 import re
 import mimetypes
+import tempfile
 
 # 加载环境变量
 dotenv.load_dotenv()
@@ -258,6 +259,50 @@ async def get_allowed_senders():
     获取允许的发件人列表
     """
     return {"allowed_senders": ALLOWED_SENDERS}
+
+@app.post("/send-email-with-files/", response_model=SendEmailResponse)
+async def send_email_with_files(
+    to: str = Form(...),
+    subject: str = Form(...),
+    body: str = Form(...),
+    files: Optional[List[UploadFile]] = File(None)
+):
+    """发送邮件，支持Form Data上传附件"""
+    if not subject.strip() or not body.strip():
+        raise HTTPException(status_code=400, detail="subject和body为必填项")
+    
+    sender_email = os.getenv("EMAIL_SENDER")
+    sender_password = os.getenv("EMAIL_PASSWORD")
+    if not sender_email or not sender_password:
+        raise HTTPException(status_code=400, detail="EMAIL_SENDER或EMAIL_PASSWORD未设置")
+    
+    temp_files = []
+    try:
+        if files:
+            temp_dir = tempfile.mkdtemp()
+            for f in files:
+                if f.filename:
+                    file_path = os.path.join(temp_dir, f.filename)
+                    content = await f.read()
+                    with open(file_path, 'wb') as pf:
+                        pf.write(content)
+                    temp_files.append(file_path)
+        
+        result = send_email(to, subject, body, temp_files if temp_files else None)
+        if not result["success"]:
+            raise HTTPException(status_code=400, detail=result["message"])
+        return SendEmailResponse(success=True, message=result["message"])
+    finally:
+        for fp in temp_files:
+            try:
+                os.remove(fp)
+            except:
+                pass
+        if temp_files:
+            try:
+                os.rmdir(os.path.dirname(temp_files[0]))
+            except:
+                pass
 
 if __name__ == "__main__":
     import uvicorn
